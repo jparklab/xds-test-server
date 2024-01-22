@@ -1,4 +1,5 @@
 .vscode
 logs
 dist
+pkg/generated
 *.code-workspace
