@@ -76,6 +76,7 @@ var XDSCallBacks = xds.CallbackFuncs{
 			eventLogger.With(
 				"event", XDSEventSubscribe,
 				"resource_name", name,
+				"version", req.InitialResourceVersions[name],
 			).Infof("XDS Event")
 		}
 		for _, name := range req.ResourceNamesUnsubscribe {
@@ -84,10 +85,12 @@ var XDSCallBacks = xds.CallbackFuncs{
 				"resource_name", name,
 			).Infof("XDS Event")
 		}
-		if len(req.ResourceNamesSubscribe) == 0 && len(req.ResourceNamesUnsubscribe) == 0 {
+		if (typeName == "Cluster" || typeName == "Listener") && nonce == "" &&
+			len(req.ResourceNamesSubscribe) == 0 && len(req.ResourceNamesUnsubscribe) == 0 {
 			eventLogger.With(
 				"event", XDSEventWildcardRequest,
 				"nonce", nonce,
+				"versions", req.InitialResourceVersions,
 			).Infof("XDS Event")
 		}
 
@@ -102,8 +105,6 @@ var XDSCallBacks = xds.CallbackFuncs{
 			"resource_type", typeName,
 		).With(metadata...)
 
-		eventLogger.Info("response")
-
 		for _, name := range res.RemovedResources {
 			eventLogger.With(
 				"event", XDSEventRemove,
@@ -111,10 +112,18 @@ var XDSCallBacks = xds.CallbackFuncs{
 			).Infof("XDS Event")
 		}
 
-		for _, name := range res.Resources {
+		for _, r := range res.Resources {
 			eventLogger.With(
 				"event", XDSEventResponse,
-				"resource_name", name,
+				"resource_name", r.Name,
+				"version", r.Version,
+				"nonce", res.Nonce,
+			).Infof("XDS Event")
+		}
+
+		if len(res.Resources) == 0 && len(res.RemovedResourceNames) == 0 {
+			eventLogger.With(
+				"event", XDSEventEmptyResponse,
 				"nonce", res.Nonce,
 			).Infof("XDS Event")
 		}

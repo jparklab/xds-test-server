@@ -26,22 +26,24 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"strconv"
 
 	"github.com/jparklab/xds-test-server/pkg/generated/config"
 	"github.com/jparklab/xds-test-server/pkg/utils/log"
+	flag "github.com/spf13/pflag"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
 var (
-	address       = flag.String("address", "localhost:5000", "address to connect to")
+	address       = flag.String("address", "localhost:5001", "address to connect to")
 	action        = flag.String("action", "add", "action to send")
 	numServices   = flag.Int("num-services", 1, "number of services to add")
 	serviceOffset = flag.Int("service-offset", 0, "offset to add to service index")
 	value         = flag.String("value", "", "value to set")
+
+	actions = []string{"add", "set_window", "use_dynamic"}
 )
 
 func main() {
@@ -78,6 +80,55 @@ func main() {
 				log.With("error", err).Errorf("Failed to send a command")
 			}
 
+		case "use_dynamic":
+			use_dynamic := true
+			if *value == "false" {
+				use_dynamic = false
+			} else if *value != "true" {
+				log.Fatalf("Invalid value: %v(must be true or false)", *value)
+			}
+
+			_, err = configClient.SendConfigCommand(
+				ctx,
+				&config.Command{
+					Type: config.CommandType_COMMAND_SET_OPTION,
+					Command: &config.Command_SetOption{
+						SetOption: &config.SetOptionCommand{
+							Key: "use_dynamic",
+							Value: &config.SetOptionCommand_BoolValue{
+								BoolValue: use_dynamic,
+							},
+						},
+					},
+				},
+			)
+			if err != nil {
+				log.With("error", err).Errorf("Failed to send a command")
+			}
+		case "set_rds_initial_fetch_timeout":
+			size, err := strconv.Atoi(*value)
+			if err != nil {
+				log.Fatalf("Invalid value: %v", *value)
+			}
+
+			_, err = configClient.SendConfigCommand(
+				ctx,
+				&config.Command{
+					Type: config.CommandType_COMMAND_SET_OPTION,
+					Command: &config.Command_SetOption{
+						SetOption: &config.SetOptionCommand{
+							Key: "rds_initial_fetch_timeout",
+							Value: &config.SetOptionCommand_Int64Value{
+								Int64Value: int64(size),
+							},
+						},
+					},
+				},
+			)
+			if err != nil {
+				log.With("error", err).Errorf("Failed to send a command")
+			}
+
 		case "set_window":
 			size, err := strconv.Atoi(*value)
 			if err != nil {
@@ -103,7 +154,7 @@ func main() {
 			}
 
 		default:
-			log.Fatalf("Unknown action: %s", *action)
+			log.Fatalf("Unknown action: %s, must be one of %v", *action, actions)
 		}
 	}
 }

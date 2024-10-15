@@ -12,7 +12,7 @@ all: $(BINDIR)/xds-server ${BINDIR}/config-client proto
 $(BINDIR)/config-client: $(SRC)
 	go build -o $@ github.com/jparklab/xds-test-server/pkg/cmd/config_client
 
-$(BINDIR)/xds-server: $(SRC)
+$(BINDIR)/xds-server: $(SRC) proto
 	go build -o $@ github.com/jparklab/xds-test-server/pkg/cmd/xds_server
 
 proto: ${PROTOSRC}

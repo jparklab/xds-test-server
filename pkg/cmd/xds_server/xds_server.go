@@ -25,7 +25,6 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -41,12 +40,14 @@ import (
 	"github.com/jparklab/xds-test-server/pkg/utils/log"
 	"github.com/jparklab/xds-test-server/pkg/xdsserver"
 	"github.com/jparklab/xds-test-server/pkg/xdsserver/source"
+	flag "github.com/spf13/pflag"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
 
 var (
 	xdsPort = flag.Int("xds-port", 5000, "the port to serve xDS service requests on.")
+	cmdPort = flag.Int("cmd-port", 5001, "the port to receive commands.")
 	nodeID  = flag.String("node-id", "test-id", "Node ID")
 )
 
@@ -58,11 +59,18 @@ func main() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 
+	cmdListener, err := net.Listen("tcp", fmt.Sprintf("localhost:%d", *cmdPort))
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+
 	grpcServer := grpc.NewServer(
 		grpc.MaxRecvMsgSize(128*1024*1024),
 		grpc.MaxSendMsgSize(128*1024*1024),
 	)
 	reflection.Register(grpcServer)
+
+	cmdServer := grpc.NewServer()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -75,7 +83,7 @@ func main() {
 	)
 
 	configSource := source.NewManualSource()
-	config.RegisterConfigServiceServer(grpcServer, configSource)
+	config.RegisterConfigServiceServer(cmdServer, configSource)
 
 	initDone := make(chan struct{}, 1)
 	xdsServer := xdsserver.NewXDSServer(
@@ -87,7 +95,15 @@ func main() {
 	// start xds server to start processing snapshots
 	go xdsServer.Start(ctx, initDone)
 
-	/* do not wait for init since we need to listen to grpc for commands
+	log.Infof("Starting cmd server at port %d", *cmdPort)
+	go func() {
+		err := cmdServer.Serve(cmdListener)
+		if err != nil {
+			log.Fatalf("Failed to start cmd server: %v", err)
+		}
+	}()
+
+	log.Info("Waiting for xDS server to initialize")
 	select {
 	case <-initDone:
 		log.Infof("Initialization done")
@@ -95,7 +111,6 @@ func main() {
 	case <-time.After(1 * time.Minute):
 		log.Fatalf("Timed out while waiting for xDS server to initialize")
 	}
-	*/
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)

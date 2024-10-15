@@ -31,6 +31,7 @@ const (
 	XDSEventUnsubscribe     = "UNSUBSCRIBE"
 	XDSEventWildcardRequest = "WILDCARD"
 	XDSEventResponse        = "RESPONSE"
+	XDSEventEmptyResponse   = "EMPTY_RESPONSE"
 	XDSEventRemove          = "REMOVE"
 	XDSEventACK             = "ACK"
 	XDSEventNACK            = "NACK"

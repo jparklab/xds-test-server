@@ -36,7 +36,11 @@ import (
 	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	dynForwardProxyCluster "github.com/envoyproxy/go-control-plane/envoy/extensions/clusters/dynamic_forward_proxy/v3"
+	dynForwardProxy "github.com/envoyproxy/go-control-plane/envoy/extensions/common/dynamic_forward_proxy/v3"
+	dynForwardProxyFilter "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/dynamic_forward_proxy/v3"
 	router "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/router/v3"
+
 	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	upstream "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
@@ -50,13 +54,16 @@ import (
 )
 
 const (
-	ListenerPort = 10000
-	UpstreamHost = "localhost"
-	UpstreamPort = 50052
+	ListenerPort                   = 10000
+	UpstreamHost                   = "localhost"
+	UpstreamPort                   = 9901
+	DynamicForwardProxyClusterName = "dynamic_forward_proxy"
 )
 
 type Options struct {
-	WindowSize uint32
+	WindowSize             uint32
+	RDSInitialFetchTimeout *durationpb.Duration
+	UseDynamicForwarding   bool
 }
 
 type ManualSource struct {
@@ -68,15 +75,33 @@ type ManualSource struct {
 	serviceNames map[string]struct{}
 
 	options Options
+	index   int64
 }
 
 var _ Source = (*ManualSource)(nil)
 
 func NewManualSource() *ManualSource {
-	return &ManualSource{
+	s := &ManualSource{
 		hasChange:    false,
 		serviceNames: make(map[string]struct{}),
 	}
+
+	/*
+		// NOTE(jpark): this is to force making updates in routes for testing
+		go func() {
+			for {
+				time.Sleep(1 * time.Second)
+				s.rwLock.Lock()
+				s.index++
+				s.options.WindowSize = uint32(s.index + 128*1024)
+				s.hasChange = true
+				s.rwLock.Unlock()
+
+			}
+		}()
+	*/
+
+	return s
 }
 
 func (s *ManualSource) Name() string {
@@ -99,22 +124,36 @@ func (s *ManualSource) Resources() InternalResources {
 	}
 
 	listenerName := "test-listener"
-	routeName := "test-route"
+	routeName := fmt.Sprintf("test-route-%d", s.index/2)
+	// routeName := fmt.Sprintf("test-route")
 
 	clusters := []*cluster.Cluster{}
 	endpoints := []*endpoint.ClusterLoadAssignment{}
 
-	for name := range s.serviceNames {
-		cl, ep := s.makeCluster(name)
-		clusters = append(clusters, cl)
-		endpoints = append(endpoints, ep)
+	if s.options.UseDynamicForwarding {
+		clusters = append(clusters, s.makeDynForwardCluster(DynamicForwardProxyClusterName))
+	} else {
+		for name := range s.serviceNames {
+			cl, ep := s.makeCluster(name)
+			clusters = append(clusters, cl)
+			endpoints = append(endpoints, ep)
+		}
 	}
 
+	// NOTE(jpark): we add a route for the first service only since that's all we need for testing.
 	listeners := []*listener.Listener{
-		makeListener(listenerName, routeName),
+		s.makeListener(listenerName, routeName, s.options.UseDynamicForwarding),
 	}
-	routes := []*route.RouteConfiguration{
-		makeRoute(routeName, clusters[0].Name),
+
+	routes := []*route.RouteConfiguration{}
+	if s.options.UseDynamicForwarding {
+		routes = append(routes,
+			makeRoute(routeName, DynamicForwardProxyClusterName, s.options.UseDynamicForwarding),
+		)
+	} else {
+		routes = append(routes,
+			makeRoute(routeName, clusters[0].Name, s.options.UseDynamicForwarding),
+		)
 	}
 
 	return InternalResources{
@@ -136,10 +175,23 @@ func (s *ManualSource) SetOption(opt *config.SetOptionCommand) {
 	case "window_size":
 		log.Infof("set window size: %d", opt.GetInt64Value())
 		s.options.WindowSize = uint32(opt.GetInt64Value())
-		s.hasChange = true
+	case "use_dynamic":
+		log.Infof("use dynamic proxy: %t", opt.GetBoolValue())
+		s.options.UseDynamicForwarding = opt.GetBoolValue()
+	case "rds_initial_fetch_timeout":
+		log.Infof("set rds initial fetch timeout: %d", opt.GetInt64Value())
+		s.options.RDSInitialFetchTimeout = &durationpb.Duration{
+			Seconds: opt.GetInt64Value(),
+		}
 	default:
 		log.Errorf("Invalid option key: %s", opt.Key)
+		return
 	}
+
+	if len(s.serviceNames) > 0 {
+		s.hasChange = true
+	}
+
 }
 
 func (s *ManualSource) SendConfigCommand(ctx context.Context, cmd *config.Command) (*empty.Empty, error) {
@@ -158,8 +210,31 @@ func (s *ManualSource) SendConfigCommand(ctx context.Context, cmd *config.Comman
 	return &empty.Empty{}, nil
 }
 
-func makeListener(listenerName string, routeName string) *listener.Listener {
+func (s *ManualSource) makeListener(listenerName string, routeName string, useDynamicForwarding bool) *listener.Listener {
+	httpFilters := []*hcm.HttpFilter{}
+
+	if useDynamicForwarding {
+		forwardProxyConfig, _ := anypb.New(&dynForwardProxyFilter.FilterConfig{
+			ImplementationSpecifier: &dynForwardProxyFilter.FilterConfig_DnsCacheConfig{
+				DnsCacheConfig: &dynForwardProxy.DnsCacheConfig{
+					Name: "dns_cache",
+				},
+			},
+		})
+		httpFilters = append(httpFilters, &hcm.HttpFilter{
+			Name: "envoy.filters.http.dynamic_forward_proxy",
+			ConfigType: &hcm.HttpFilter_TypedConfig{
+				TypedConfig: forwardProxyConfig,
+			},
+		})
+	}
+
 	routerConfig, _ := anypb.New(&router.Router{})
+	httpFilters = append(httpFilters, &hcm.HttpFilter{
+		Name:       wellknown.Router,
+		ConfigType: &hcm.HttpFilter_TypedConfig{TypedConfig: routerConfig},
+	})
+
 	// HTTP filter configuration
 	manager := &hcm.HttpConnectionManager{
 		CodecType:  hcm.HttpConnectionManager_AUTO,
@@ -169,15 +244,14 @@ func makeListener(listenerName string, routeName string) *listener.Listener {
 				ConfigSource: &core.ConfigSource{
 					ResourceApiVersion:    core.ApiVersion_V3,
 					ConfigSourceSpecifier: &core.ConfigSource_Ads{},
+					InitialFetchTimeout:   s.options.RDSInitialFetchTimeout,
 				},
 				RouteConfigName: routeName,
 			},
 		},
-		HttpFilters: []*hcm.HttpFilter{{
-			Name:       wellknown.Router,
-			ConfigType: &hcm.HttpFilter_TypedConfig{TypedConfig: routerConfig},
-		}},
+		HttpFilters: httpFilters,
 	}
+
 	pbst, err := anypb.New(manager)
 	if err != nil {
 		panic(err)
@@ -207,7 +281,40 @@ func makeListener(listenerName string, routeName string) *listener.Listener {
 	}
 }
 
-func makeRoute(routeName string, clusterName string) *route.RouteConfiguration {
+func makeRoute(routeName string, clusterName string, useDynamicProxy bool) *route.RouteConfiguration {
+	if useDynamicProxy {
+		perRouteConfig, _ := anypb.New(&dynForwardProxyFilter.PerRouteConfig{
+			HostRewriteSpecifier: &dynForwardProxyFilter.PerRouteConfig_HostRewriteHeader{
+				HostRewriteHeader: "x-host-rewrite",
+			},
+		})
+
+		return &route.RouteConfiguration{
+			Name: routeName,
+			VirtualHosts: []*route.VirtualHost{{
+				Name:    "local_service",
+				Domains: []string{"*"},
+				Routes: []*route.Route{{
+					Match: &route.RouteMatch{
+						PathSpecifier: &route.RouteMatch_Prefix{
+							Prefix: "/",
+						},
+					},
+					Action: &route.Route_Route{
+						Route: &route.RouteAction{
+							ClusterSpecifier: &route.RouteAction_Cluster{
+								Cluster: clusterName,
+							},
+						},
+					},
+					TypedPerFilterConfig: map[string]*anypb.Any{
+						"envoy.filters.http.dynamic_forward_proxy": perRouteConfig,
+					},
+				}},
+			}},
+		}
+	}
+
 	return &route.RouteConfiguration{
 		Name: routeName,
 		VirtualHosts: []*route.VirtualHost{{
@@ -260,7 +367,7 @@ func (s *ManualSource) makeCluster(clusterName string) (*cluster.Cluster, *endpo
 			EdsConfig: &core.ConfigSource{
 				ResourceApiVersion:    core.ApiVersion_V3,
 				ConfigSourceSpecifier: &core.ConfigSource_Ads{},
-				InitialFetchTimeout:   durationpb.New(0 * time.Second),
+				InitialFetchTimeout:   durationpb.New(10 * time.Second),
 			},
 		},
 		LbPolicy:        cluster.Cluster_ROUND_ROBIN,
@@ -294,6 +401,7 @@ func (s *ManualSource) makeCluster(clusterName string) (*cluster.Cluster, *endpo
 	}
 
 	if s.options.WindowSize > 0 {
+		log.Infof("window size: %d", s.options.WindowSize)
 		protoOption, err := anypb.New(&upstream.HttpProtocolOptions{
 			UpstreamProtocolOptions: &upstream.HttpProtocolOptions_ExplicitHttpConfig_{
 				ExplicitHttpConfig: &upstream.HttpProtocolOptions_ExplicitHttpConfig{
@@ -314,8 +422,11 @@ func (s *ManualSource) makeCluster(clusterName string) (*cluster.Cluster, *endpo
 		}
 	}
 
+	//* NOTE(jpark): comment/uncomment this to test unique names
 	hashVal := hashConfig(cluster)
 	newName := fmt.Sprintf("%s-%s", clusterName, hashVal)
+	//*/
+	//  newName := clusterName
 
 	cluster.Name = newName
 	cluster.LoadAssignment.ClusterName = newName
@@ -323,4 +434,27 @@ func (s *ManualSource) makeCluster(clusterName string) (*cluster.Cluster, *endpo
 	endpoint.ClusterName = newName
 
 	return cluster, endpoint
+}
+
+func (s *ManualSource) makeDynForwardCluster(clusterName string) *cluster.Cluster {
+	cacheConfig, _ := anypb.New(&dynForwardProxyCluster.ClusterConfig{
+		ClusterImplementationSpecifier: &dynForwardProxyCluster.ClusterConfig_DnsCacheConfig{
+			DnsCacheConfig: &dynForwardProxy.DnsCacheConfig{
+				Name: "dns_cache",
+			},
+		},
+	})
+	cluster := &cluster.Cluster{
+		Name:     clusterName,
+		LbPolicy: cluster.Cluster_CLUSTER_PROVIDED,
+		ClusterDiscoveryType: &cluster.Cluster_ClusterType{
+			ClusterType: &cluster.Cluster_CustomClusterType{
+				Name:        "envoy.clusters.dynamic_forward_proxy",
+				TypedConfig: cacheConfig,
+			},
+		},
+		ConnectTimeout: durationpb.New(time.Duration(s.index) * time.Second),
+	}
+
+	return cluster
 }
