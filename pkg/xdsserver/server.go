@@ -83,7 +83,7 @@ func NewXDSServer(
 }
 
 func (s *XDSServer) Start(ctx context.Context, initDone chan<- struct{}) error {
-	log.Infof("Starting xDS server")
+	log.Infof("Starting xDS server(refresh interval: %s)", s.batchInterval)
 
 	firstSnapshot := true
 	ticker := time.NewTicker(s.batchInterval)

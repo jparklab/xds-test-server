@@ -43,7 +43,7 @@ var (
 	serviceOffset = flag.Int("service-offset", 0, "offset to add to service index")
 	value         = flag.String("value", "", "value to set")
 
-	actions = []string{"add", "set_window", "use_dynamic"}
+	actions = []string{"add", "set_window", "use_dynamic", "set_rds_initial_fetch_timeout"}
 )
 
 func main() {

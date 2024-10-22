@@ -24,7 +24,7 @@
 
 ## Query the server 
 
-    grpcurl -plaintext 127.0.0.1:50051 list
+    grpcurl -plaintext 127.0.0.1:5000 list
 
 ## Send commands
 
